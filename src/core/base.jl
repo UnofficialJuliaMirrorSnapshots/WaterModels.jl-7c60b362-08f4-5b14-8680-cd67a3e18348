@@ -1,11 +1,4 @@
-export
-    GenericWaterModel,
-    optimize!,
-    run_generic_model, build_generic_model, solve_generic_model,
-    ismultinetwork, nw_ids, nws,
-    ids, ref, var, con, ext, fun
-
-""
+"root of the water formulation type hierarchy"
 abstract type AbstractWaterFormulation end
 
 """
@@ -114,28 +107,37 @@ var(wm::GenericWaterModel, nw::Int) = wm.var[:nw][nw]
 var(wm::GenericWaterModel, nw::Int, key::Symbol) = wm.var[:nw][nw][key]
 var(wm::GenericWaterModel, nw::Int, key::Symbol, idx) = wm.var[:nw][nw][key][idx]
 
+var(wm::GenericWaterModel; nw::Int=wm.cnw) = wm.var[:nw][nw]
+var(wm::GenericWaterModel, key::Symbol; nw::Int=wm.cnw) = wm.var[:nw][nw][key]
+var(wm::GenericWaterModel, key::Symbol, idx; nw::Int=wm.cnw) = wm.var[:nw][nw][key][idx]
+
 ""
 con(wm::GenericWaterModel, nw::Int) = wm.con[:nw][nw]
 con(wm::GenericWaterModel, nw::Int, key::Symbol) = wm.con[:nw][nw][key]
 con(wm::GenericWaterModel, nw::Int, key::Symbol, idx) = wm.con[:nw][nw][key][idx]
 
+con(wm::GenericWaterModel; nw::Int=wm.cnw) = wm.con[:nw][nw]
+con(wm::GenericWaterModel, key::Symbol; nw::Int=wm.cnw) = wm.con[:nw][nw][key]
+con(wm::GenericWaterModel, key::Symbol, idx; nw::Int=wm.cnw) = wm.con[:nw][nw][key][idx]
+
 ""
 fun(wm::GenericWaterModel, nw::Int) = wm.fun[:nw][nw]
 fun(wm::GenericWaterModel, nw::Int, key::Symbol) = wm.fun[:nw][nw][key]
+
 
 ""
 function optimize!(wm::GenericWaterModel, optimizer::JuMP.OptimizerFactory)
     if wm.model.moi_backend.state == MOIU.NO_OPTIMIZER
         _, solve_time, solve_bytes_alloc, sec_in_gc = @timed JuMP.optimize!(wm.model, optimizer)
     else
-        Memento.warn(LOGGER, "Model already contains optimizer factory, cannot use optimizer specified in `solve_generic_model`")
+        Memento.warn(_LOGGER, "Model already contains optimizer factory, cannot use optimizer specified in `solve_generic_model`")
         _, solve_time, solve_bytes_alloc, sec_in_gc = @timed JuMP.optimize!(wm.model)
     end
 
     try
         solve_time = MOI.get(wm.model, MOI.SolveTime())
     catch
-        Memento.warn(LOGGER, "The given optimizer does not provide the SolveTime() attribute, falling back on @timed. This is not a rigorous timing value.");
+        Memento.warn(_LOGGER, "The given optimizer does not provide the SolveTime() attribute, falling back on @timed. This is not a rigorous timing value.");
     end
 
     return JuMP.termination_status(wm.model), JuMP.primal_status(wm.model), solve_time
@@ -172,7 +174,11 @@ function build_generic_model(data::Dict{String,<:Any}, model_constructor, post_m
     wm = model_constructor(data; kwargs...)
 
     if !multinetwork && ismultinetwork(wm)
-        Memento.error(LOGGER, "Attempted to build a single-network model with multi-network data.")
+        Memento.error(_LOGGER, "Attempted to build a single-network model with multi-network data.")
+    end
+
+    if multinetwork && !ismultinetwork(wm)
+        Memento.error(_LOGGER, "Attempted to build a multi-network model with single-network data.")
     end
 
     post_method(wm)
@@ -205,6 +211,7 @@ Some of the common keys include:
 * `:pumps` -- the set of pumps in the network,
 * `:valves` -- the set of valves in the network,
 * `:links` -- the set of all links in the network,
+* `:links_ne` -- the set of all network expansion links in the network,
 * `:junctions` -- the set of junctions in the network,
 * `:reservoirs` -- the set of reservoirs in the network,
 * `:tanks` -- the set of tanks in the network,
@@ -217,6 +224,11 @@ function build_ref(data::Dict{String,<:Any})
     nws = refs[:nw] = Dict{Int,Any}()
 
     if InfrastructureModels.ismultinetwork(data)
+        for (key, item) in data
+            if !isa(item, Dict{String,Any}) || key in _wm_global_keys
+                refs[Symbol(key)] = item
+            end
+        end
         nws_data = data["nw"]
     else
         nws_data = Dict("0" => data)
@@ -229,7 +241,7 @@ function build_ref(data::Dict{String,<:Any})
         for (key, item) in nw_data
             if isa(item, Dict{String,Any})
                 try
-                    item_lookup = Dict{Int,Any}([(parse(Int, k), v) for (k,v) in item])
+                    item_lookup = Dict{Int,Any}([(parse(Int, k), v) for (k, v) in item])
                     ref[Symbol(key)] = item_lookup
                 catch
                     ref[Symbol(key)] = item
@@ -240,16 +252,63 @@ function build_ref(data::Dict{String,<:Any})
         end
 
         ref[:links] = merge(ref[:pipes], ref[:valves], ref[:pumps])
+        ref[:pipes_ne] = filter(is_ne_link, ref[:pipes])
         ref[:links_ne] = filter(is_ne_link, ref[:links])
-        ref[:links_known_direction] = filter(has_known_flow_direction, ref[:links])
-        ref[:links_unknown_direction] = filter(!has_known_flow_direction, ref[:links])
-        ref[:nodes] = merge(ref[:junctions], ref[:reservoirs], ref[:emitters])
+        ref[:check_valves] = filter(has_check_valve, ref[:pipes])
+
+        ref[:arcs_fr] = [(i, comp["f_id"], comp["t_id"]) for (i, comp) in ref[:links]]
+        #ref[:arcs_to]   = [(i,comp["t_id"],comp["f_id"]) for (i,comp) in ref[:links]]
+        #ref[:arcs] = [ref[:arcs_fr]; ref[:arcs_to]]
+
+        #node_arcs = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
+        #for (l,i,j) in ref[:arcs]
+        #    push!(node_arcs[i], (l,i,j))
+        #end
+        #ref[:node_arcs] = node_arcs
+
+        node_arcs_fr = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
+        for (l,i,j) in ref[:arcs_fr]
+            push!(node_arcs_fr[i], (l,i,j))
+        end
+        ref[:node_arcs_fr] = node_arcs_fr
+
+        node_arcs_to = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
+        for (l,i,j) in ref[:arcs_fr]
+            push!(node_arcs_to[j], (l,i,j))
+        end
+        ref[:node_arcs_to] = node_arcs_to
+
+
+        #ref[:nodes] = merge(ref[:junctions], ref[:tanks], ref[:reservoirs])
+        node_junctions = Dict((i, Int[]) for (i,node) in ref[:nodes])
+        for (i, junction) in ref[:junctions]
+            push!(node_junctions[junction["junction_node"]], i)
+        end
+        ref[:node_junctions] = node_junctions
+
+        node_tanks = Dict((i, Int[]) for (i,node) in ref[:nodes])
+        for (i,tank) in ref[:tanks]
+            push!(node_tanks[tank["tank_node"]], i)
+        end
+        ref[:node_tanks] = node_tanks
+
+        node_reservoirs = Dict((i, Int[]) for (i,node) in ref[:nodes])
+        for (i,reservoir) in ref[:reservoirs]
+            push!(node_reservoirs[reservoir["reservoir_node"]], i)
+        end
+        ref[:node_reservoirs] = node_reservoirs
+
+        # TODO: Fix these when feeling ambitious about more carefully handling directions.
+        #ref[:links_known_direction] = filter(has_known_flow_direction, ref[:links])
+        #ref[:links_unknown_direction] = filter(!has_known_flow_direction, ref[:links])
 
         # Set the resistances based on the head loss type.
-        viscosity = ref[:options]["viscosity"]
-        ref[:alpha] = ref[:options]["headloss"] == "h-w" ? 1.852 : 2.0
-        ref[:resistance] = calc_resistances(ref[:links], viscosity, ref[:options]["headloss"])
-        ref[:resistance_cost] = calc_resistance_costs(ref[:links], viscosity, ref[:options]["headloss"])
+        headloss = ref[:options]["hydraulic"]["headloss"]
+        viscosity = ref[:options]["hydraulic"]["viscosity"]
+        ref[:alpha] = headloss == "H-W" ? 1.852 : 2.0
+
+        ref[:resistance] = calc_resistances(ref[:pipes], viscosity, headloss)
+        ref[:resistance_cost] = calc_resistance_costs(ref[:pipes], viscosity, headloss)
     end
 
     return refs

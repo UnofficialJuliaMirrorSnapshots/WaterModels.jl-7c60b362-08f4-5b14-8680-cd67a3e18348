@@ -1,7 +1,7 @@
 ""
 function build_solution(wm::GenericWaterModel, solve_time; objective = NaN, solution_builder = get_solution)
     sol = init_solution(wm)
-    data = Dict{String,Any}("title" => wm.data["title"])
+    data = Dict{String,Any}("name" => wm.data["name"])
 
     if InfrastructureModels.ismultinetwork(wm.data)
         sol["multinetwork"] = true
@@ -13,13 +13,13 @@ function build_solution(wm::GenericWaterModel, solve_time; objective = NaN, solu
             wm.cnw = parse(Int, n)
             solution_builder(wm, sol_nw)
             data_nws[n] = Dict("name" => get(nw_data, "name", "anonymous"),
-                               "link_count" => length(wm[:ref][n][:links]),
-                               "node_count" => length(wm[:ref][n][:nodes]))
+                               "link_count" => length(ref(wm, :links)),
+                               "node_count" => length(ref(wm, :nodes)))
         end
     else
         solution_builder(wm, sol)
-        data["link_count"] = length(wm.ref[:nw][wm.cnw][:links])
-        data["node_count"] = length(wm.ref[:nw][wm.cnw][:nodes])
+        data["link_count"] = length(ref(wm, :links))
+        data["node_count"] = length(ref(wm, :nodes))
     end
 
     cpu = Sys.cpu_info()[1].model
@@ -33,7 +33,6 @@ function build_solution(wm::GenericWaterModel, solve_time; objective = NaN, solu
         "solution" => sol,
         "machine" => Dict("cpu" => cpu, "memory" => memory),
         "data" => data)
-    #"dual_status" => JuMP.dual_status(wm.model),
 
     wm.solution = solution
 
@@ -49,20 +48,39 @@ end
 ""
 function get_solution(wm::GenericWaterModel, sol::Dict{String,<:Any})
     add_pipe_flow_rate_setpoint(sol, wm)
+    add_pump_flow_rate_setpoint(sol, wm)
+    add_pump_status_setpoint(sol, wm)
     add_pipe_resistance_setpoint(sol, wm)
-    add_junction_head_setpoint(sol, wm)
+    add_node_head_setpoint(sol, wm)
+    add_reservoir_setpoint(sol, wm)
 end
 
 function add_pipe_flow_rate_setpoint(sol, wm::GenericWaterModel)
     add_setpoint(sol, wm, "pipes", "q", :q)
 end
 
-function add_junction_head_setpoint(sol, wm::GenericWaterModel)
-    if :h in keys(wm.var[:nw][wm.cnw])
-        add_setpoint(sol, wm, "junctions", "h", :h)
+function add_pump_flow_rate_setpoint(sol, wm::GenericWaterModel)
+    add_setpoint(sol, wm, "pumps", "q", :q)
+end
+
+function add_pump_status_setpoint(sol, wm::GenericWaterModel)
+    add_setpoint(sol, wm, "pumps", "x_pump", :x_pump)
+end
+
+function add_node_head_setpoint(sol, wm::GenericWaterModel)
+    if :h in keys(var(wm))
+        add_setpoint(sol, wm, "nodes", "h", :h)
     else
         # TODO: Add something here to compute heads from a flow rate solution.
     end
+end
+
+function add_reservoir_setpoint(sol, wm::GenericWaterModel)
+    add_setpoint(sol, wm, "reservoirs", "q_r", :q_r)
+end
+
+function add_tank_setpoint(sol, wm::GenericWaterModel)
+    add_setpoint(sol, wm, "reservoirs", "q_t", :q_t)
 end
 
 function add_pipe_resistance_setpoint(sol, wm::GenericWaterModel)
@@ -78,25 +96,25 @@ function add_pipe_resistance_setpoint(sol, wm::GenericWaterModel)
         sol["pipes"] = sol_dict
     end
 
-    if :x_res in keys(wm.var[:nw][wm.cnw])
+    if :x_res in keys(var(wm))
         for (i, link) in data_dict
             a = link["id"]
             sol_item = sol_dict[i] = get(sol_dict, i, Dict{String, Any}())
 
-            if a in keys(wm.var[:nw][wm.cnw][:x_res])
-                x_res, r_id = findmax(JuMP.value.(wm.var[:nw][wm.cnw][:x_res][a]))
-                sol_item["r"] = wm.ref[:nw][wm.cnw][:resistance][a][r_id]
+            if a in keys(var(wm, :x_res))
+                x_res, r_id = findmax(JuMP.value.(var(wm, :x_res, a)))
+                sol_item["r"] = ref(wm, :resistance, a)[r_id]
             else
-                x_res, r_id = findmin(wm.ref[:nw][wm.cnw][:resistance][a])
-                sol_item["r"] = wm.ref[:nw][wm.cnw][:resistance][a][r_id]
+                x_res, r_id = findmin(ref(wm, :resistance, a))
+                sol_item["r"] = ref(wm, :resistance, a)[r_id]
             end
         end
     else
         for (i, link) in data_dict
             a = link["id"]
             sol_item = sol_dict[i] = get(sol_dict, i, Dict{String, Any}())
-            x_res, r_id = findmin(wm.ref[:nw][wm.cnw][:resistance][a])
-            sol_item["r"] = wm.ref[:nw][wm.cnw][:resistance][a][r_id]
+            x_res, r_id = findmin(ref(wm, :resistance, a))
+            sol_item["r"] = ref(wm, :resistance, a)[r_id]
         end
     end
 end

@@ -1,8 +1,8 @@
-function run_wf(network, model_constructor, optimizer; relaxed::Bool=false, kwargs...)
-    return run_generic_model(network, model_constructor, optimizer, post_wf, relaxed=relaxed; kwargs...)
+function run_owf(network, model_constructor, optimizer; relaxed::Bool=false, kwargs...)
+    return run_generic_model(network, model_constructor, optimizer, post_owf, relaxed=relaxed; kwargs...)
 end
 
-function post_wf(wm::GenericWaterModel{T}) where T
+function post_owf(wm::GenericWaterModel{T}) where T
     # TODO: Do not use conditionals here.
     if T <: Union{AbstractMICPForm, AbstractNCNLPForm}
         function_f_alpha(wm, convex=false)
@@ -33,7 +33,6 @@ function post_wf(wm::GenericWaterModel{T}) where T
     for a in ids(wm, :pumps)
         constraint_link_flow(wm, a)
         constraint_potential_loss_pump(wm, a)
-        constraint_pump_control(wm, a)
     end
 
     for (i, node) in ref(wm, :nodes)
@@ -53,14 +52,14 @@ function post_wf(wm::GenericWaterModel{T}) where T
         constraint_tank_state(wm, i)
     end
 
-    objective_wf(wm)
+    objective_owf(wm)
 end
 
-function run_mn_wf(file, model_constructor, optimizer; kwargs...)
-    return run_generic_model(file, model_constructor, optimizer, post_mn_wf; multinetwork=true, kwargs...)
+function run_mn_owf(file, model_constructor, optimizer; kwargs...)
+    return run_generic_model(file, model_constructor, optimizer, post_mn_owf; multinetwork=true, kwargs...)
 end
 
-function post_mn_wf(wm::GenericWaterModel{T}) where T
+function post_mn_owf(wm::GenericWaterModel{T}) where T
     if T <: Union{AbstractMICPForm, AbstractNCNLPForm}
         function_f_alpha(wm, convex=false)
     elseif T <: AbstractCNLPForm
@@ -114,11 +113,6 @@ function post_mn_wf(wm::GenericWaterModel{T}) where T
 
     n_1 = network_ids[1]
 
-    # Initial conditions of pumps.
-    for a in ids(wm, :pumps, nw=n_1)
-        constraint_pump_control(wm, a, nw=n_1)
-    end
-
     # Initial conditions of tanks.
     for i in ids(wm, :tanks, nw=n_1)
         constraint_tank_state(wm, i, nw=n_1)
@@ -130,12 +124,8 @@ function post_mn_wf(wm::GenericWaterModel{T}) where T
             constraint_tank_state(wm, i, n_1, n_2)
         end
 
-        for a in ids(wm, :pumps, nw=n_2)
-            constraint_pump_control(wm, a, n_1, n_2)
-        end
-
         n_1 = n_2
     end
 
-    objective_wf(wm)
+    objective_owf(wm)
 end

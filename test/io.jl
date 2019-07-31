@@ -1,16 +1,28 @@
 @testset "src/io/common.jl" begin
     @testset "parse_file (.inp)" begin
-        shamir_data = WaterModels.parse_file("../test/data/epanet/shamir.inp")
-        shamir_title = "shamir -- Bragalli, D'Ambrosio, Lee, Lodi, Toth (2008)"
-        @test shamir_data["title"] == lowercase(shamir_title)
-
         balerma_data = WaterModels.parse_file("../test/data/epanet/balerma.inp")
-        balerma_title = "Balerma Network"
-        @test balerma_data["title"] == lowercase(balerma_title)
+        balerma_name = "Balerma Network"
+        @test balerma_data["name"] == balerma_name
 
         klmod_data = WaterModels.parse_file("../test/data/epanet/klmod.inp")
-        klmod_title = "Global Water Full network - Peak Day (Avg * 1.9)"
-        @test klmod_data["title"] == lowercase(klmod_title)
+        klmod_name = "Global Water Full network - Peak Day (Avg * 1.9)"
+        @test klmod_data["name"] == klmod_name
+
+        richmond_skeleton_data = WaterModels.parse_file("../test/data/epanet/richmond-skeleton.inp")
+        richmond_skeleton_name = "Richmond Skeleton Water Supply System"
+        @test richmond_skeleton_data["name"] == richmond_skeleton_name
+
+        richmond_skeleton_sp_data = WaterModels.parse_file("../test/data/epanet/richmond-skeleton-sp.inp")
+        richmond_skeleton_sp_name = "Richmond Skeleton Water Supply System (First Time Point)"
+        @test richmond_skeleton_sp_data["name"] == richmond_skeleton_sp_name
+
+        shamir_data = WaterModels.parse_file("../test/data/epanet/shamir.inp")
+        shamir_name = "shamir -- Bragalli, D'Ambrosio, Lee, Lodi, Toth (2008)"
+        @test shamir_data["name"] == shamir_name
+
+        shamir_ts_data = WaterModels.parse_file("../test/data/epanet/shamir-ts.inp")
+        shamir_ts_name = "shamir (time series) -- Bragalli, D'Ambrosio, Lee, Lodi, Toth (2008)"
+        @test shamir_ts_data["name"] == shamir_ts_name
     end
 
     @testset "parse_file (.json)" begin

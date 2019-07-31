@@ -1,157 +1,4 @@
-# Functions for working with the WaterModels internal data format.
-
-function calc_head_bounds(wm::GenericWaterModel, n::Int = wm.cnw)
-    # Get indices of nodes used in the network.
-    junction_ids = collect(ids(wm, :junctions))
-    reservoir_ids = collect(ids(wm, :reservoirs))
-    nodes = [junction_ids; reservoir_ids]
-
-    # Get placeholders for junctions and reservoirs.
-    junctions = wm.ref[:nw][n][:junctions]
-    reservoirs = wm.ref[:nw][n][:reservoirs]
-
-    # Get maximum elevation/head values at nodes.
-    max_elev = maximum([node["elev"] for node in values(junctions)])
-    max_head = maximum([node["head"] for node in values(reservoirs)])
-
-    # Initialize the dictionaries for minimum and maximum heads.
-    head_min = Dict([(i, -Inf) for i in nodes])
-    head_max = Dict([(i, Inf) for i in nodes])
-
-    for (i, junction) in junctions
-        # The minimum head at junctions must be above the initial elevation.
-        if haskey(junction, "minimumHead")
-            head_min[i] = max(junction["elev"], junction["minimumHead"])
-        else
-            head_min[i] = junction["elev"]
-        end
-
-        # The maximum head at junctions must be below the max reservoir height.
-        if haskey(junction, "maximumHead")
-            head_max[i] = max(max(max_elev, max_head), junction["maximumHead"])
-        else
-            head_max[i] = max(max_elev, max_head)
-        end
-    end
-
-    for (i, reservoir) in reservoirs
-        # Head values at reservoirs are fixed.
-        head_min[i] = reservoir["head"]
-        head_max[i] = reservoir["head"]
-    end
-
-    # Return the dictionaries of lower and upper bounds.
-    return head_min, head_max
-end
-
-function calc_head_difference_bounds(wm::GenericWaterModel, n::Int = wm.cnw)
-    # Get placeholders for junctions and reservoirs.
-    links = wm.ref[:nw][n][:links]
-
-    # Initialize the dictionaries for minimum and maximum head differences.
-    head_lbs, head_ubs = calc_head_bounds(wm, n)
-    head_diff_min = Dict([(a, -Inf) for a in keys(links)])
-    head_diff_max = Dict([(a, Inf) for a in keys(links)])
-
-    # Compute the head difference bounds.
-    for (a, link) in links
-        head_diff_min[a] = head_lbs[link["f_id"]] - head_ubs[link["t_id"]]
-        head_diff_max[a] = head_ubs[link["f_id"]] - head_lbs[link["t_id"]]
-    end
-
-    # Return the head difference bound dictionaries.
-    return head_diff_min, head_diff_max
-end
-
-function calc_flow_rate_bounds(wm::GenericWaterModel, n::Int=wm.cnw)
-    links = wm.ref[:nw][n][:links]
-    dh_lb, dh_ub = calc_head_difference_bounds(wm, n)
-
-    alpha = wm.ref[:nw][n][:alpha]
-    junctions = values(wm.ref[:nw][n][:junctions])
-    sum_demand = sum(junction["demand"] for junction in junctions)
-
-    lb = Dict([(a, Float64[]) for a in keys(links)])
-    ub = Dict([(a, Float64[]) for a in keys(links)])
-
-    for (a, link) in links
-        L = link["length"]
-        resistances = wm.ref[:nw][n][:resistance][a]
-        num_resistances = length(resistances)
-
-        lb[a] = zeros(Float64, (num_resistances,))
-        ub[a] = zeros(Float64, (num_resistances,))
-
-        for (r_id, r) in enumerate(resistances)
-            lb[a][r_id] = sign(dh_lb[a]) * (abs(dh_lb[a]) / (L * r))^(inv(alpha))
-            lb[a][r_id] = max(lb[a][r_id], -sum_demand)
-
-            ub[a][r_id] = sign(dh_ub[a]) * (abs(dh_ub[a]) / (L * r))^(inv(alpha))
-            ub[a][r_id] = min(ub[a][r_id], sum_demand)
-
-            if link["flow_direction"] == POSITIVE
-                lb[a][r_id] = max(lb[a][r_id], 0.0)
-            elseif link["flow_direction"] == NEGATIVE
-                ub[a][r_id] = min(ub[a][r_id], 0.0)
-            end
-
-            if haskey(link, "diameters") && haskey(link, "maximumVelocity")
-                D_a = link["diameters"][r_id]["diameter"]
-                v_a = link["maximumVelocity"]
-                rate_bound = 0.25 * pi * v_a * D_a * D_a
-                lb[a][r_id] = max(lb[a][r_id], -rate_bound)
-                ub[a][r_id] = min(ub[a][r_id], rate_bound)
-            end
-        end
-    end
-
-    return lb, ub
-end
-
-function calc_directed_flow_upper_bounds(wm::GenericWaterModel, alpha::Float64, n::Int=wm.cnw)
-    # Get a dictionary of resistance values.
-    dh_lb, dh_ub = calc_head_difference_bounds(wm, n)
-
-    links = wm.ref[:nw][n][:links]
-    ub_n = Dict([(a, Float64[]) for a in keys(links)])
-    ub_p = Dict([(a, Float64[]) for a in keys(links)])
-
-    junctions = values(wm.ref[:nw][n][:junctions])
-    sum_demand = sum(junction["demand"] for junction in junctions)
-
-    for (a, link) in links
-        L = link["length"]
-        R_a = wm.ref[:nw][n][:resistance][a]
-
-        ub_n[a] = zeros(Float64, (length(R_a),))
-        ub_p[a] = zeros(Float64, (length(R_a),))
-
-        for r in 1:length(R_a)
-            ub_n[a][r] = abs(dh_lb[a] / (L * R_a[r]))^(1.0 / alpha)
-            ub_n[a][r] = min(ub_n[a][r], sum_demand)
-
-            ub_p[a][r] = abs(dh_ub[a] / (L * R_a[r]))^(1.0 / alpha)
-            ub_p[a][r] = min(ub_p[a][r], sum_demand)
-
-            if link["flow_direction"] == POSITIVE || dh_lb[a] >= 0.0
-                ub_n[a][r] = 0.0
-            elseif link["flow_direction"] == NEGATIVE || dh_ub[a] <= 0.0
-                ub_p[a][r] = 0.0
-            end
-
-            if haskey(link, "diameters") && haskey(link, "maximumVelocity")
-                D_a = link["diameters"][r]["diameter"]
-                v_a = link["maximumVelocity"]
-                rate_bound = 0.25 * pi * v_a * D_a * D_a
-                ub_n[a][r] = min(ub_n[a][r], rate_bound)
-                ub_p[a][r] = min(ub_p[a][r], rate_bound)
-            end
-        end
-    end
-
-    return ub_n, ub_p
-end
-
+# Functions for working with the WaterModels data format.
 function calc_resistance_hw(diameter::Float64, roughness::Float64)
     return 10.67 * inv(roughness^1.852 * diameter^4.87)
 end
@@ -161,7 +8,7 @@ function calc_resistances_hw(links::Dict{<:Any, Any})
 
     for (a, link) in links
         if haskey(link, "resistances")
-            resistances[a] = sort(link["resistances"], rev = true)
+            resistances[a] = sort(link["resistances"], rev=true)
         elseif haskey(link, "resistance")
             resistances[a] = vcat(resistances[a], link["resistance"])
         elseif haskey(link, "diameters")
@@ -170,7 +17,7 @@ function calc_resistances_hw(links::Dict{<:Any, Any})
                 resistances[a] = vcat(resistances[a], r)
             end
 
-            resistances[a] = sort(resistances[a], rev = true)
+            resistances[a] = sort(resistances[a], rev=true)
         else
             r = calc_resistance_hw(link["diameter"], link["roughness"])
             resistances[a] = vcat(resistances[a], r)
@@ -291,22 +138,22 @@ function calc_resistance_costs_dw(links::Dict{Int, Any}, viscosity::Float64)
 end
 
 function calc_resistances(links::Dict{<:Any, Any}, viscosity::Float64, head_loss_type::String)
-    if head_loss_type == "h-w"
+    if head_loss_type == "H-W"
         return calc_resistances_hw(links)
-    elseif head_loss_type == "d-w"
+    elseif head_loss_type == "D-W"
         return calc_resistances_dw(links, viscosity)
     else
-        Memento.error(LOGGER, "Head loss formulation type \"$(head_loss_type)\" is not recognized.")
+        Memento.error(_LOGGER, "Head loss formulation type \"$(head_loss_type)\" is not recognized.")
     end
 end
 
 function calc_resistance_costs(links::Dict{Int, Any}, viscosity::Float64, head_loss_type::String)
-    if head_loss_type == "h-w"
+    if head_loss_type == "H-W"
         return calc_resistance_costs_hw(links)
-    elseif head_loss_type == "d-w"
+    elseif head_loss_type == "D-W"
         return calc_resistance_costs_dw(links, viscosity)
     else
-        Memento.error(LOGGER, "Head loss formulation type \"$(head_loss_type)\" is not recognized.")
+        Memento.error(_LOGGER, "Head loss formulation type \"$(head_loss_type)\" is not recognized.")
     end
 end
 
@@ -314,14 +161,16 @@ function has_known_flow_direction(link::Pair{Int, Any})
     return link.second["flow_direction"] != UNKNOWN
 end
 
-function is_ne_link(link::Pair{String, Any})
-    return haskey(link.second, "diameters") ||
-           haskey(link.second, "resistances")
+function has_check_valve(pipe::Pair{Int64, Any})
+    return pipe.second["status"] == "CV"
 end
 
-function is_ne_link(link::Pair{Int, Any})
-    return haskey(link.second, "diameters") ||
-           haskey(link.second, "resistances")
+function is_ne_link(link::Pair{Int64, Any})
+    return any([x in ["diameters", "resistances"] for x in keys(link.second)])
+end
+
+function is_ne_link(link::Pair{String, Any})
+    return any([x in ["diameters", "resistances"] for x in keys(link.second)])
 end
 
 function is_out_node(i::Int)
@@ -336,9 +185,97 @@ function is_in_node(i::Int)
     end
 end
 
+
+"""
+Turns in given single network data in multinetwork data with a `count`
+replicate of the given network. Note that this function performs a deepcopy of
+the network data. Significant multinetwork space savings can often be achieved
+by building application specific methods of building multinetwork with minimal
+data replication.
+"""
+function replicate(sn_data::Dict{String,<:Any}, count::Int; global_keys::Set{String}=Set{String}())
+    wm_global_keys = Set(["per_unit"])
+    return InfrastructureModels.replicate(sn_data, count, global_keys=union(global_keys, _wm_global_keys))
+end
+
+
+"turns a single network and a time_series data block into a multi-network"
+function make_multinetwork(data::Dict{String,<:Any})
+    if InfrastructureModels.ismultinetwork(data)
+        Memento.error(_LOGGER, "make_multinetwork does not support multinetwork data")
+    end
+
+    if !haskey(data, "time_series")
+        Memento.error(_LOGGER, "make_multinetwork requires time_series data")
+    end
+
+    # hard coded for the moment
+    steps = data["time_series"]["num_steps"]
+
+    mn_data = InfrastructureModels.replicate(data, steps, global_keys=_wm_global_keys)
+    time_series = pop!(mn_data, "time_series")
+
+    for i in 1:steps
+        nw_data = mn_data["nw"]["$(i)"]
+        for (k,v) in data["time_series"]
+            if isa(v, Dict) && haskey(nw_data, k)
+                #println(k); println(v)
+                _update_data_timepoint!(nw_data[k], v, i)
+            end
+        end
+    end
+
+    return mn_data
+end
+
+
+"loads a single time point from a time_series data block into the current network"
+function load_timepoint!(data::Dict{String,<:Any}, step_index::Int)
+    if InfrastructureModels.ismultinetwork(data)
+        Memento.error(_LOGGER, "load_timepoint! does not support multinetwork data")
+    end
+
+    if !haskey(data, "time_series")
+        Memento.error(_LOGGER, "load_timepoint! requires time_series data")
+    end
+
+    if step_index < 1 || step_index > data["time_series"]["num_steps"]
+        Memento.error(_LOGGER, "a step index of $(step_index) is outside the valid range of 1:$(data["time_series"]["num_steps"])")
+    end
+
+    for (k,v) in data["time_series"]
+        if isa(v, Dict) && haskey(data, k)
+            _update_data_timepoint!(data[k], v, step_index)
+        end
+    end
+
+    data["step_index"] = step_index
+
+    return
+end
+
+
+"recursive call of _update_data"
+function _update_data_timepoint!(data::Dict{String,<:Any}, new_data::Dict{String,<:Any}, step::Int)
+    for (key, new_v) in new_data
+        if haskey(data, key)
+            v = data[key]
+            if isa(v, Dict) && isa(new_v, Dict)
+                _update_data_timepoint!(v, new_v, step)
+            elseif (!isa(v, Dict) || !isa(v, Array)) && isa(new_v, Array)
+                data[key] = new_v[step]
+            else
+                Memento.warn(_LOGGER, "skipping key $(key) because object types do not match, target $(typeof(v)) source $(typeof(new_v))")
+            end
+        else
+            Memento.warn(_LOGGER, "skipping time_series key $(key) because it does not occur in the target data")
+        end
+    end
+end
+
 function set_start_head!(data)
-    for (i, junction) in data["junctions"]
-        junction["h_start"] = junction["h"]
+    for (i, node) in data["nodes"]
+        node["h_start"] = node["h"]
     end
 end
 
@@ -357,7 +294,7 @@ end
 
 function set_start_directed_head_difference!(data::Dict{String, Any})
     head_loss_type = data["options"]["headloss"]
-    alpha = head_loss_type == "h-w" ? 1.852 : 2.0
+    alpha = head_loss_type == "H-W" ? 1.852 : 2.0
 
     for (a, pipe) in data["pipes"]
         dh_abs = pipe["length"] * pipe["r"] * abs(pipe["q"])^(alpha)
@@ -367,8 +304,8 @@ function set_start_directed_head_difference!(data::Dict{String, Any})
 end
 
 function set_start_resistance_ne!(data::Dict{String, Any})
-    viscosity = data["options"]["viscosity"]
-    head_loss_type = data["options"]["headloss"]
+    viscosity = data["options"]["hydraulic"]["viscosity"]
+    head_loss_type = data["options"]["hydraulic"]["headloss"]
     resistances = calc_resistances(data["pipes"], viscosity, head_loss_type)
 
     for (a, pipe) in filter(is_ne_link, data["pipes"])
@@ -380,8 +317,8 @@ function set_start_resistance_ne!(data::Dict{String, Any})
 end
 
 function set_start_undirected_flow_rate_ne!(data::Dict{String, Any})
-    viscosity = data["options"]["viscosity"]
-    head_loss_type = data["options"]["headloss"]
+    viscosity = data["options"]["hydraulic"]["viscosity"]
+    head_loss_type = data["options"]["hydraulic"]["headloss"]
     resistances = calc_resistances(data["pipes"], viscosity, head_loss_type)
 
     for (a, pipe) in filter(is_ne_link, data["pipes"])
@@ -393,8 +330,8 @@ function set_start_undirected_flow_rate_ne!(data::Dict{String, Any})
 end
 
 function set_start_directed_flow_rate_ne!(data::Dict{String, Any})
-    viscosity = data["options"]["viscosity"]
-    head_loss_type = data["options"]["headloss"]
+    viscosity = data["options"]["hydraulic"]["viscosity"]
+    head_loss_type = data["options"]["hydraulic"]["headloss"]
     resistances = calc_resistances(data["pipes"], viscosity, head_loss_type)
 
     for (a, pipe) in filter(is_ne_link, data["pipes"])
