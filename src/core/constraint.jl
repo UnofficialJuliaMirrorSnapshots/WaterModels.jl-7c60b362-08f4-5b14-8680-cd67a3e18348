@@ -9,33 +9,27 @@ function constraint_flow_conservation(wm::GenericWaterModel{T}, n::Int, i::Int, 
 
     # Add the flow conservation constraint.
     con(wm, n, :flow_conservation)[i] = JuMP.@constraint(wm.model,
-        sum(-q[l] for (l,f,t) in node_arcs_fr) +
-        sum(q[l] for (l,f,t) in node_arcs_to)
-        ==
+        sum(-q[l] for (l, f, t) in node_arcs_fr) +
+        sum( q[l] for (l, f, t) in node_arcs_to) ==
         sum(-q_r[rid] for rid in node_reservoirs) +
         sum(-q_t[tid] for tid in node_tanks) +
-        sum(demand for (jid, demand) in node_demands)
-    )
+        sum(demand for (jid, demand) in node_demands))
 end
 
-
 function constraint_flow_conservation(wm::GenericWaterModel{T}, n::Int, i::Int, node_arcs_fr, node_arcs_to, node_reservoirs, node_tanks, node_demands) where T <: AbstractDirectedFlowFormulation
-    qn = var(wm, n, :qn)
-    qp = var(wm, n, :qp)
+    q_p = var(wm, n, :qp)
+    q_n = var(wm, n, :qn)
     q_r = var(wm, n, :q_r)
     q_t = var(wm, n, :q_t)
 
     # Add the flow conservation constraint.
     con(wm, n, :flow_conservation)[i] = JuMP.@constraint(wm.model,
-        sum(  qp[l] - qn[l] for (l,f,t) in node_arcs_to) +
-        sum( -qp[l] + qn[l] for (l,f,t) in node_arcs_fr)
-        ==
+        sum( q_p[l] - q_n[l] for (l, f, t) in node_arcs_to) +
+        sum(-q_p[l] + q_n[l] for (l, f, t) in node_arcs_fr) ==
         sum(-q_r[rid] for rid in node_reservoirs) +
         sum(-q_t[tid] for tid in node_tanks) +
-        sum(demand for (jid, demand) in node_demands)
-    )
+        sum(demand for (jid, demand) in node_demands))
 end
-
 
 function constraint_resistance_selection_ne(wm::GenericWaterModel{T}, n::Int, a::Int, pipe_resistances) where T <: AbstractDirectedFlowFormulation
     if !haskey(con(wm, n), :resistance_selection_sum)
@@ -134,13 +128,13 @@ function constraint_flow_direction_selection_ne(wm::GenericWaterModel{T}, n::Int
 end
 
 
-function constraint_head_difference(wm::GenericWaterModel, n::Int, a::Int, f_id, t_id, head_fr, head_to)
+function constraint_head_difference(wm::GenericWaterModel, n::Int, a::Int, node_fr, node_to, head_fr, head_to)
     if head_fr == nothing
-        head_fr = var(wm, n, :h, f_id)
+        head_fr = var(wm, n, :h, node_fr)
     end
 
     if head_to == nothing
-        head_to = var(wm, n, :h, t_id)
+        head_to = var(wm, n, :h, node_to)
     end
 
     x_dir = var(wm, n, :x_dir, a)
@@ -261,16 +255,18 @@ function constraint_link_flow(wm::GenericWaterModel{T}, n::Int, a::Int) where T 
 end
 
 
-function constraint_check_valve(wm::GenericWaterModel, n::Int, a::Int, f_id::Int, t_id::Int)
+function constraint_check_valve(wm::GenericWaterModel, n::Int, a::Int, node_fr::Int, node_to::Int)
     q = var(wm, n, :q, a)
-    h_i = var(wm, n, :h, f_id)
-    h_j = var(wm, n, :h, t_id)
+    h_i = var(wm, n, :h, node_fr)
+    h_j = var(wm, n, :h, node_to)
     x_cv = var(wm, n, :x_cv, a)
+    q_ub = JuMP.upper_bound(q)
 
-    con(wm, n, :check_valve_1)[a] = JuMP.@constraint(wm.model, q <= JuMP.upper_bound(q) * x_cv)
-    # TODO: These constraints result in infeasibility in Richmond full case.
-    con(wm, n, :check_valve_2)[a] = JuMP.@NLconstraint(wm.model, x_cv * h_i >= x_cv * h_j)
-    con(wm, n, :check_valve_3)[a] = JuMP.@NLconstraint(wm.model, (1 - x_cv) * h_i <= (1 - x_cv) * h_j)
+    con(wm, n, :check_valve_1)[a] = JuMP.@constraint(wm.model, q <= q_ub * x_cv)
+    con(wm, n, :check_valve_2)[a] = JuMP.@constraint(wm.model, q >= 1.0e-6 * x_cv)
+    # TODO: These constraints seem to result in infeasibility in multiperiod Richmond case.
+    con(wm, n, :check_valve_3)[a] = JuMP.@NLconstraint(wm.model, x_cv * h_i >= x_cv * h_j)
+    con(wm, n, :check_valve_4)[a] = JuMP.@NLconstraint(wm.model, (1 - x_cv) * h_i <= (1 - x_cv) * h_j)
 end
 
 
@@ -282,9 +278,9 @@ end
 function constraint_sink_flow(wm::GenericWaterModel{T}, n::Int, i::Int, links) where T <: AbstractDirectedFlowFormulation
     # Collect the required variables.
     x_dir = var(wm, n, :x_dir)
-    out_arcs = filter(a -> i == a.second["f_id"], links)
+    out_arcs = filter(a -> i == a.second["node_fr"], links)
     out = Array{JuMP.VariableRef}([x_dir[a] for a in keys(out_arcs)])
-    in_arcs = filter(a -> i == a.second["t_id"], links)
+    in_arcs = filter(a -> i == a.second["node_to"], links)
     in = Array{JuMP.VariableRef}([x_dir[a] for a in keys(in_arcs)])
 
     # Add the sink flow direction constraint.
@@ -301,9 +297,9 @@ end
 function constraint_source_flow(wm::GenericWaterModel{T}, n::Int, i::Int, links) where T <: AbstractDirectedFlowFormulation
     # Collect the required variables.
     x_dir = var(wm, n, :x_dir)
-    out_arcs = filter(a -> i == a.second["f_id"], links)
+    out_arcs = filter(a -> i == a.second["node_fr"], links)
     out = Array{JuMP.VariableRef}([x_dir[a] for a in keys(out_arcs)])
-    in_arcs = filter(a -> i == a.second["t_id"], links)
+    in_arcs = filter(a -> i == a.second["node_to"], links)
     in = Array{JuMP.VariableRef}([x_dir[a] for a in keys(in_arcs)])
 
     # Add the source flow direction constraint.
@@ -357,26 +353,16 @@ function constraint_pump_control_initial(wm::GenericWaterModel, n::Int, a::Int, 
     c_1 = JuMP.@constraint(wm.model, x == status)
 end
 
-""
-function constraint_tank_state_initial(wm::GenericWaterModel, n::Int, i::Int, initial_volume::Float64, time_step::Float64)
-    if !haskey(con(wm, n), :tank_state)
-        con(wm, n)[:tank_state] = Dict{Int, JuMP.ConstraintRef}()
-    end
-
+function constraint_tank_state_initial(wm::GenericWaterModel, n::Int, i::Int, V_0::Float64, time_step::Float64)
     V = var(wm, n, :V, i)
-    con(wm, n, :tank_state)[i] = JuMP.@constraint(wm.model, V == initial_volume)
+    c = JuMP.@constraint(wm.model, V == V_0)
+    con(wm, n, :tank_state)[i] = c
 end
 
-
-""
 function constraint_tank_state(wm::GenericWaterModel, n_1::Int, n_2::Int, i::Int, time_step::Float64)
-    if !haskey(con(wm, n_2), :tank_state)
-        con(wm, n_2)[:tank_state] = Dict{Int, JuMP.ConstraintRef}()
-    end
-
+    q_t = var(wm, n_1, :q_t, i)
     V_1 = var(wm, n_1, :V, i)
     V_2 = var(wm, n_2, :V, i)
-    q_t = var(wm, n_1, :q_t, i)
-
-    con(wm, n_2, :tank_state)[i] = JuMP.@constraint(wm.model, V_2 - V_1 + time_step * q_t == 0.0)
+    c = JuMP.@constraint(wm.model, V_2 - V_1 + time_step * q_t == 0.0)
+    con(wm, n_2, :tank_state)[i] = c
 end

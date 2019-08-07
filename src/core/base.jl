@@ -33,32 +33,31 @@ Methods on `GenericWaterModel` for defining variables and adding constraints sho
 mutable struct GenericWaterModel{T<:AbstractWaterFormulation}
     model::JuMP.Model
 
-    data::Dict{String,<:Any}
-    setting::Dict{String,<:Any}
-    solution::Dict{String,<:Any}
+    data::Dict{String, <:Any}
+    setting::Dict{String, <:Any}
+    solution::Dict{String, <:Any}
 
-    ref::Dict{Symbol,<:Any}
-    var::Dict{Symbol,<:Any}
-    con::Dict{Symbol,<:Any}
-    fun::Dict{Symbol,<:Any}
+    ref::Dict{Symbol, <:Any}
+    var::Dict{Symbol, <:Any}
+    con::Dict{Symbol, <:Any}
+    fun::Dict{Symbol, <:Any}
     cnw::Int
 
     # Extensions should define a type to hold information particular to
     # their functionality, and store an instance of the type in this
     # dictionary keyed on an extension-specific symbol.
-    ext::Dict{Symbol,<:Any}
+    ext::Dict{Symbol, <:Any}
 end
 
-function GenericWaterModel(data::Dict{String,<:Any}, T::DataType; ext = Dict{Symbol,Any}(), setting = Dict{String,Any}(), jump_model::JuMP.Model=JuMP.Model(), kwargs...)
+function GenericWaterModel(data::Dict{String, <:Any}, T::DataType; ext = Dict{Symbol, Any}(), setting = Dict{String, Any}(), jump_model::JuMP.Model=JuMP.Model(), kwargs...)
     ref = build_ref(data)
-    var = Dict{Symbol,Any}(:nw => Dict{Int,Any}())
-    con = Dict{Symbol,Any}(:nw => Dict{Int,Any}())
-    fun = Dict{Symbol,Any}(:nw => Dict{Int,Any}())
+    var = Dict{Symbol, Any}(:nw => Dict{Int, Any}())
+    con = Dict{Symbol, Any}(:nw => Dict{Int, Any}())
+    fun = Dict{Symbol, Any}()
 
     for nw_id in keys(ref[:nw])
         var[:nw][nw_id] = Dict{Symbol, Any}()
         con[:nw][nw_id] = Dict{Symbol, Any}()
-        fun[:nw][nw_id] = Dict{Symbol, Any}()
     end
 
     cnw = minimum([k for k in keys(var[:nw])])
@@ -67,7 +66,7 @@ function GenericWaterModel(data::Dict{String,<:Any}, T::DataType; ext = Dict{Sym
              jump_model,
              data,
              setting,
-             Dict{String,Any}(), # solution
+             Dict{String, Any}(), # solution
              ref,
              var,
              con,
@@ -121,9 +120,8 @@ con(wm::GenericWaterModel, key::Symbol; nw::Int=wm.cnw) = wm.con[:nw][nw][key]
 con(wm::GenericWaterModel, key::Symbol, idx; nw::Int=wm.cnw) = wm.con[:nw][nw][key][idx]
 
 ""
-fun(wm::GenericWaterModel, nw::Int) = wm.fun[:nw][nw]
-fun(wm::GenericWaterModel, nw::Int, key::Symbol) = wm.fun[:nw][nw][key]
-
+fun(wm::GenericWaterModel) = wm.fun
+fun(wm::GenericWaterModel, key::Symbol) = wm.fun[key]
 
 ""
 function optimize!(wm::GenericWaterModel, optimizer::JuMP.OptimizerFactory)
@@ -150,7 +148,7 @@ function run_generic_model(file::String, model_constructor, optimizer, post_meth
 end
 
 ""
-function run_generic_model(data::Dict{String,<:Any}, model_constructor, optimizer, post_method; relaxed::Bool=false, solution_builder=get_solution, kwargs...)
+function run_generic_model(data::Dict{String, <:Any}, model_constructor, optimizer, post_method; relaxed::Bool=false, solution_builder=get_solution, kwargs...)
     wm = build_generic_model(data, model_constructor, post_method; kwargs...)
     #wm, time, bytes_alloc, sec_in_gc = @timed build_generic_model(data, model_constructor, post_method; kwargs...)
     #println("model build time: $(time)")
@@ -169,7 +167,7 @@ function build_generic_model(file::String, model_constructor, post_method; kwarg
 end
 
 ""
-function build_generic_model(data::Dict{String,<:Any}, model_constructor, post_method; multinetwork=false, kwargs...)
+function build_generic_model(data::Dict{String, <:Any}, model_constructor, post_method; multinetwork=false, kwargs...)
     # NOTE, this model constructor will build the ref dict using the latest info from the data
     wm = model_constructor(data; kwargs...)
 
@@ -218,14 +216,14 @@ Some of the common keys include:
 * `:emitters` -- the set of emitters in the network,
 * `:nodes` -- the set of all nodes in the network
 """
-function build_ref(data::Dict{String,<:Any})
-    refs = Dict{Symbol,Any}()
+function build_ref(data::Dict{String, <:Any})
+    refs = Dict{Symbol, Any}()
 
-    nws = refs[:nw] = Dict{Int,Any}()
+    nws = refs[:nw] = Dict{Int, Any}()
 
     if InfrastructureModels.ismultinetwork(data)
         for (key, item) in data
-            if !isa(item, Dict{String,Any}) || key in _wm_global_keys
+            if !isa(item, Dict{String, Any}) || key in _wm_global_keys
                 refs[Symbol(key)] = item
             end
         end
@@ -236,12 +234,12 @@ function build_ref(data::Dict{String,<:Any})
 
     for (n, nw_data) in nws_data
         nw_id = parse(Int, n)
-        ref = nws[nw_id] = Dict{Symbol,Any}()
+        ref = nws[nw_id] = Dict{Symbol, Any}()
 
         for (key, item) in nw_data
-            if isa(item, Dict{String,Any})
+            if isa(item, Dict{String, Any})
                 try
-                    item_lookup = Dict{Int,Any}([(parse(Int, k), v) for (k, v) in item])
+                    item_lookup = Dict{Int, Any}([(parse(Int, k), v) for (k, v) in item])
                     ref[Symbol(key)] = item_lookup
                 catch
                     ref[Symbol(key)] = item
@@ -256,8 +254,8 @@ function build_ref(data::Dict{String,<:Any})
         ref[:links_ne] = filter(is_ne_link, ref[:links])
         ref[:check_valves] = filter(has_check_valve, ref[:pipes])
 
-        ref[:arcs_fr] = [(i, comp["f_id"], comp["t_id"]) for (i, comp) in ref[:links]]
-        #ref[:arcs_to]   = [(i,comp["t_id"],comp["f_id"]) for (i,comp) in ref[:links]]
+        ref[:arcs_fr] = [(i, comp["node_fr"], comp["node_to"]) for (i, comp) in ref[:links]]
+        #ref[:arcs_to]   = [(i,comp["node_to"],comp["node_fr"]) for (i,comp) in ref[:links]]
         #ref[:arcs] = [ref[:arcs_fr]; ref[:arcs_to]]
 
         #node_arcs = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
@@ -266,35 +264,38 @@ function build_ref(data::Dict{String,<:Any})
         #end
         #ref[:node_arcs] = node_arcs
 
-        node_arcs_fr = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
-        for (l,i,j) in ref[:arcs_fr]
-            push!(node_arcs_fr[i], (l,i,j))
+        node_arcs_fr = Dict((i, Tuple{Int, Int, Int}[]) for (i, node) in ref[:nodes])
+
+        for (l, i, j) in ref[:arcs_fr]
+            push!(node_arcs_fr[i], (l, i, j))
         end
+
         ref[:node_arcs_fr] = node_arcs_fr
 
-        node_arcs_to = Dict((i, Tuple{Int,Int,Int}[]) for (i,node) in ref[:nodes])
-        for (l,i,j) in ref[:arcs_fr]
-            push!(node_arcs_to[j], (l,i,j))
-        end
-        ref[:node_arcs_to] = node_arcs_to
+        node_arcs_to = Dict((i, Tuple{Int, Int, Int}[]) for (i, node) in ref[:nodes])
 
+        for (l, i, j) in ref[:arcs_fr]
+            push!(node_arcs_to[j], (l, i, j))
+        end
+
+        ref[:node_arcs_to] = node_arcs_to
 
         #ref[:nodes] = merge(ref[:junctions], ref[:tanks], ref[:reservoirs])
         node_junctions = Dict((i, Int[]) for (i,node) in ref[:nodes])
         for (i, junction) in ref[:junctions]
-            push!(node_junctions[junction["junction_node"]], i)
+            push!(node_junctions[junction["junctions_node"]], i)
         end
         ref[:node_junctions] = node_junctions
 
         node_tanks = Dict((i, Int[]) for (i,node) in ref[:nodes])
         for (i,tank) in ref[:tanks]
-            push!(node_tanks[tank["tank_node"]], i)
+            push!(node_tanks[tank["tanks_node"]], i)
         end
         ref[:node_tanks] = node_tanks
 
         node_reservoirs = Dict((i, Int[]) for (i,node) in ref[:nodes])
         for (i,reservoir) in ref[:reservoirs]
-            push!(node_reservoirs[reservoir["reservoir_node"]], i)
+            push!(node_reservoirs[reservoir["reservoirs_node"]], i)
         end
         ref[:node_reservoirs] = node_reservoirs
 

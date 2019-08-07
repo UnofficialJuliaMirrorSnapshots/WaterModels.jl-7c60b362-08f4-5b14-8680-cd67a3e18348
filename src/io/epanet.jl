@@ -8,7 +8,7 @@ _INP_SECTIONS = ["[OPTIONS]", "[TITLE]", "[JUNCTIONS]", "[RESERVOIRS]",
                  "[TIMES]", "[REPORT]", "[COORDINATES]", "[VERTICES]",
                  "[LABELS]", "[BACKDROP]", "[TAGS]"]
 
-function _add_link_ids!(data::Dict{String, Any})
+function _add_link_ids!(data::Dict{String, <:Any})
     link_types = ["pipes", "pumps", "valves"]
     link_names = vcat([collect(keys(data[t])) for t in link_types]...)
     all_int = all([tryparse(Int64, x) != nothing for x in link_names])
@@ -16,9 +16,10 @@ function _add_link_ids!(data::Dict{String, Any})
     if all_int
         for link_type in link_types
             for (link_name, link) in data[link_type]
-                link["id"] = parse(Int64, link_name)
-                link["f_id"] = _get_node_id_by_name(data, link["start_node_name"])
-                link["t_id"] = _get_node_id_by_name(data, link["end_node_name"])
+                link["index"] = parse(Int64, link_name)
+                link["node_fr"] = data["node_map"][pop!(link, "start_node_name")]
+                link["node_to"] = data["node_map"][pop!(link, "end_node_name")]
+                data["link_map"][link_name] = link["index"]
 
                 # Add default status for pump if not present (Open).
                 if link_type == "pumps" && link["initial_status"] == nothing
@@ -30,12 +31,13 @@ function _add_link_ids!(data::Dict{String, Any})
         link_id::Int64 = 1
 
         for link_type in link_types
-            start_id = link_id
+            starnode_to = link_id
 
             for (link_name, link) in data[link_type]
-                link["id"] = link_id
-                link["f_id"] = _get_node_id_by_name(data, link["start_node_name"])
-                link["t_id"] = _get_node_id_by_name(data, link["end_node_name"])
+                link["index"] = link_id
+                link["node_fr"] = data["node_map"][pop!(link, "start_node_name")]
+                link["node_to"] = data["node_map"][pop!(link, "end_node_name")]
+                data["link_map"][link_name] = link["index"]
                 link_id += 1
 
                 # Add default status for pump if not present (Open).
@@ -44,20 +46,18 @@ function _add_link_ids!(data::Dict{String, Any})
                 end
             end
 
-            new_ids = start_id:(start_id+length(keys(data[link_type]))-1)
+            new_ids = starnode_to:(starnode_to+length(keys(data[link_type]))-1)
             new_keys = String[string(x) for x in new_ids]
             data[link_type] = DataStructures.OrderedDict{String,Any}(new_keys .=> values(data[link_type]))
         end
     end
-
 
     for link_type in ["pumps"]
         # Update the link IDs in time series.
         ts_link_ids = Array{Int64, 1}()
 
         for (link_name, link) in data["time_series"][link_type]
-            id = _get_link_id_by_name(data, link_name)
-            ts_link_ids = vcat(ts_link_ids, id)
+            ts_link_ids = vcat(ts_link_ids, data["link_map"][link_name])
         end
 
         new_keys = String[string(x) for x in ts_link_ids]
@@ -70,7 +70,7 @@ function _add_link_ids!(data::Dict{String, Any})
     end
 end
 
-function _correct_status!(data::Dict{String, Any})
+function _correct_status!(data::Dict{String, <:Any})
     for (id, pump) in data["pumps"]
         initial_status = pump["initial_status"]
 
@@ -106,7 +106,7 @@ function _correct_status!(data::Dict{String, Any})
     end
 end
 
-function _correct_time_series!(data::Dict{String, Any})
+function _correct_time_series!(data::Dict{String, <:Any})
     duration = data["options"]["time"]["duration"]
     time_step = data["options"]["time"]["hydraulic_timestep"]
     num_steps = convert(Int64, floor(duration / time_step))
@@ -127,74 +127,78 @@ function _correct_time_series!(data::Dict{String, Any})
     end
 end
 
-function _add_node_ids!(data::Dict{String, Any})
+function _add_node_ids!(data::Dict{String, <:Any})
     node_types = ["junctions", "reservoirs", "tanks"]
-    node_id_field = Dict(
-        "junctions" => "junction_node",
-        "reservoirs" => "reservoir_node",
-        "tanks" => "tank_node",
-    )
+    node_id_field = Dict(t => t * "_node" for t in node_types)
     node_names = vcat([collect(keys(data[t])) for t in node_types]...)
-    all_int = all([tryparse(Int64, x) != nothing for x in node_names])
 
-    if all_int
+    if all([tryparse(Int64, x) != nothing for x in node_names])
         for node_type in node_types
             for (node_name, node) in data[node_type]
-                node["id"] = parse(Int64, node_name)
+                node["index"] = parse(Int64, node_name)
+                data["node_map"][node_name] = node["index"]
             end
         end
     else
         node_id::Int64 = 1
 
         for node_type in node_types
-            start_id = node_id
+            starnode_to = node_id
 
             for (node_name, node) in data[node_type]
-                node["id"] = node_id
+                node["index"] = node_id
+                data["node_map"][node_name] = node["index"]
                 node_id += 1
             end
 
-            new_ids = start_id:(start_id+length(keys(data[node_type]))-1)
+            new_ids = starnode_to:(starnode_to+length(keys(data[node_type]))-1)
             new_keys = String[string(x) for x in new_ids]
             data[node_type] = DataStructures.OrderedDict{String,Any}(new_keys .=> values(data[node_type]))
         end
     end
 
     nodes = Dict{String, Any}()
+
     for node_type in node_types
         nid_field = node_id_field[node_type]
-        for (i,comp) in data[node_type]
-            @assert i == "$(comp["id"])"
-            comp[nid_field] = comp["id"]
-            node = Dict{String, Any}(
-                "id" => comp["id"],
-                "source_id" => [node_type, comp["source_id"]]
-            )
+
+        for (i, comp) in data[node_type]
+            @assert i == "$(comp["index"])"
+            comp[nid_field] = comp["index"]
+            node = Dict{String, Any}("index" => comp["index"],
+                "source_id" => [node_type, comp["source_id"]])
+
             if haskey(comp, "name")
                 node["name"] = comp["name"]
             end
+
             if haskey(comp, "elevation")
                 #node["elevation"] = pop!(comp, "elevation")
                 node["elevation"] = comp["elevation"]
             end
+
             if haskey(comp, "minimumHead")
                 node["minimumHead"] = pop!(comp, "minimumHead")
             end
+
             if haskey(comp, "maximumHead")
                 node["maximumHead"] = pop!(comp, "maximumHead")
             end
+
             if haskey(comp, "head")
                 node["elevation"] = comp["head"]
             end
+
             @assert !haskey(nodes, i)
             nodes[i] = node
         end
     end
+
     data["nodes"] = nodes
 
-    for (i,junction) in data["junctions"]
-        if isapprox(junction["demand"], 0.0)
-            Memento.info(_LOGGER, "dropping junction $(i) due to zero demand")
+    for (i, junction) in data["junctions"]
+        if isapprox(junction["demand"], 0.0, atol=1.0e-7)
+            Memento.info(_LOGGER, "Dropping junction $(i) due to zero demand.")
             delete!(data["junctions"], i)
         end
     end
@@ -207,8 +211,7 @@ function _add_node_ids!(data::Dict{String, Any})
         ts_node_ids = Array{Int64, 1}()
 
         for (node_name, node) in data["time_series"][node_type]
-            id = _get_node_id_by_name(data, node_name)
-            ts_node_ids = vcat(ts_node_ids, id)
+            ts_node_ids = vcat(ts_node_ids, data["node_map"][node_name])
         end
 
         new_keys = String[string(x) for x in ts_node_ids]
@@ -256,10 +259,14 @@ function _initialize_data()
     data["flow_units"] = nothing
     data["time_series"] = Dict{String, Any}()
 
+    # Map EPANET indices to internal indices.
+    data["node_map"] = Dict{String, Int}()
+    data["link_map"] = Dict{String, Int}()
+
     return data
 end
 
-function _get_link_type_by_name(data::Dict{String, Any}, name::AbstractString)
+function _get_link_type_by_name(data::Dict{String, <:Any}, name::AbstractString)
     link_types = ["pumps", "pipes", "valves"]
 
     for link_type in link_types
@@ -271,7 +278,7 @@ function _get_link_type_by_name(data::Dict{String, Any}, name::AbstractString)
     end
 end
 
-function _get_link_by_name(data::Dict{String, Any}, name::AbstractString)
+function _get_link_by_name(data::Dict{String, <:Any}, name::AbstractString)
     link_types = ["pumps", "pipes", "valves"]
 
     for link_type in link_types
@@ -283,19 +290,7 @@ function _get_link_by_name(data::Dict{String, Any}, name::AbstractString)
     end
 end
 
-function _get_link_id_by_name(data::Dict{String, Any}, name::AbstractString)
-    link_types = ["pumps", "pipes", "valves"]
-
-    for link_type in link_types
-        for (link_id, link) in data[link_type]
-            if link["name"] == name
-                return link["id"]
-            end
-        end
-    end
-end
-
-function _get_node_by_name(data::Dict{String, Any}, name::AbstractString)
+function _get_node_by_name(data::Dict{String, <:Any}, name::AbstractString)
     node_types = ["junctions", "reservoirs", "tanks"]
 
     for node_type in node_types
@@ -307,15 +302,7 @@ function _get_node_by_name(data::Dict{String, Any}, name::AbstractString)
     end
 end
 
-function _get_node_id_by_name(data::Dict{String, Any}, name::AbstractString)
-    for (node_id, node) in data["nodes"]
-        if node["name"] == name
-            return node["id"]
-        end
-    end
-end
-
-function _get_node_type_by_name(data::Dict{String, Any}, name::AbstractString)
+function _get_node_type_by_name(data::Dict{String, <:Any}, name::AbstractString)
     node_types = ["junctions", "reservoirs", "tanks"]
 
     for node_type in node_types
@@ -460,8 +447,6 @@ function _clean_nothing!(data)
             delete!(data, key)
         end
     end
-
-    return data
 end
 
 """
@@ -532,7 +517,7 @@ function parse_epanet(filename::String)
     # TANKS
     _read_tanks!(data)
 
-    # Create consistent node "id" fields.
+    # Create consistent node "index" fields.
     _add_node_ids!(data)
 
     # PIPES
@@ -547,7 +532,7 @@ function parse_epanet(filename::String)
     # ENERGY
     _read_energy!(data)
 
-    # Create consistent link "id" fields.
+    # Create consistent link "index" fields.
     _add_link_ids!(data)
 
     # COORDINATES
@@ -579,6 +564,8 @@ function parse_epanet(filename::String)
 
     # Delete the data that has now been properly parsed.
     delete!(data, "sections")
+    delete!(data, "node_map")
+    delete!(data, "link_map")
 
     # Add other data required by InfrastructureModels.
     data["per_unit"] = false
@@ -590,7 +577,7 @@ function parse_epanet(filename::String)
     return data
 end
 
-function _read_controls!(data::Dict{String, Any})
+function _read_controls!(data::Dict{String, <:Any})
     # TODO: There are a lot of possible conditions that remain to be implemented.
     control_count = 0
 
@@ -660,7 +647,7 @@ function _read_controls!(data::Dict{String, Any})
                     if node_type == "junctions"
                         # TODO: Fill this out when necessary.
                     elseif node_type == "tanks"
-                        condition["node_id"] = node["id"]
+                        condition["node_id"] = node["index"]
                         condition["node_type"] = node_type
                         condition["attribute"] = "level"
 
@@ -679,7 +666,7 @@ function _read_controls!(data::Dict{String, Any})
     end
 end
 
-function _read_curves!(data::Dict{String, Any})
+function _read_curves!(data::Dict{String, <:Any})
     data["curves"] = Dict{String, Array{Tuple{Float64, Float64}}}()
 
     for (line_number, line) in data["sections"]["[CURVES]"]
@@ -703,7 +690,7 @@ function _read_curves!(data::Dict{String, Any})
     end
 end
 
-function _read_energy!(data::Dict{String, Any})
+function _read_energy!(data::Dict{String, <:Any})
     for (line_number, line) in data["sections"]["[ENERGY]"]
         line = split(line, ";")[1]
         current = split(line)
@@ -772,7 +759,7 @@ function _read_energy!(data::Dict{String, Any})
     end
 end
 
-function _read_junctions!(data::Dict{String, Any})
+function _read_junctions!(data::Dict{String, <:Any})
     data["junctions"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
     data["time_series"]["junctions"] = DataStructures.OrderedDict{String, Any}()
 
@@ -839,7 +826,7 @@ function _read_junctions!(data::Dict{String, Any})
     end
 end
 
-function _read_options!(data::Dict{String, Any})
+function _read_options!(data::Dict{String, <:Any})
     data["options"] = DataStructures.OrderedDict{String, Any}(
         "energy" => Dict{String, Any}(), "hydraulic" => Dict{String, Any}(),
         "quality" => Dict{String, Any}(), "solver" => Dict{String, Any}(),
@@ -918,7 +905,7 @@ function _read_options!(data::Dict{String, Any})
     end
 end
 
-function _read_patterns!(data::Dict{String, Any})
+function _read_patterns!(data::Dict{String, <:Any})
     data["patterns"] = DataStructures.OrderedDict{String, Array}()
 
     for (line_number, line) in data["sections"]["[PATTERNS]"]
@@ -977,7 +964,7 @@ function _read_patterns!(data::Dict{String, Any})
     end
 end
 
-function _read_pipes!(data::Dict{String, Any})
+function _read_pipes!(data::Dict{String, <:Any})
     data["pipes"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
 
     # Get the demand units (e.g., LPS, GPM).
@@ -1048,7 +1035,7 @@ function _read_pipes!(data::Dict{String, Any})
     end
 end
 
-function _read_pumps!(data::Dict{String, Any})
+function _read_pumps!(data::Dict{String, <:Any})
     data["pumps"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
     data["time_series"]["pumps"] = DataStructures.OrderedDict{String, Any}()
 
@@ -1121,7 +1108,7 @@ function _read_pumps!(data::Dict{String, Any})
     end
 end
 
-function _read_reservoirs!(data::Dict{String, Any})
+function _read_reservoirs!(data::Dict{String, <:Any})
     data["reservoirs"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
     data["time_series"]["reservoirs"] = DataStructures.OrderedDict{String, Any}()
 
@@ -1177,7 +1164,7 @@ function _read_reservoirs!(data::Dict{String, Any})
     end
 end
 
-function _read_status!(data::Dict{String, Any})
+function _read_status!(data::Dict{String, <:Any})
     for (line_number, line) in data["sections"]["[STATUS]"]
         line = split(line, ";")[1]
         current = split(line)
@@ -1204,7 +1191,7 @@ function _read_status!(data::Dict{String, Any})
     end
 end
 
-function _read_tanks!(data::Dict{String, Any})
+function _read_tanks!(data::Dict{String, <:Any})
     data["tanks"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
 
     for (line_number, line) in data["sections"]["[TANKS]"]
@@ -1257,7 +1244,7 @@ function _read_tanks!(data::Dict{String, Any})
     end
 end
 
-function _read_times!(data::Dict{String, Any})
+function _read_times!(data::Dict{String, <:Any})
     time_format = ["am", "AM", "pm", "PM"]
     data["options"]["time"] = Dict{String, Any}()
 
@@ -1294,7 +1281,7 @@ function _read_times!(data::Dict{String, Any})
     end
 end
 
-function _read_title!(data::Dict{String, Any})
+function _read_title!(data::Dict{String, <:Any})
     lines = Array{String}[]
 
     for (line_number, line) in data["sections"]["[TITLE]"]
@@ -1311,7 +1298,7 @@ function _read_title!(data::Dict{String, Any})
     data["name"] = join(lines, " ")
 end
 
-function _read_valves!(data::Dict{String, Any})
+function _read_valves!(data::Dict{String, <:Any})
     data["valves"] = DataStructures.OrderedDict{String, Dict{String, Any}}()
 
     for (line_number, line) in data["sections"]["[VALVES]"]
